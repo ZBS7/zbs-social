@@ -3,10 +3,12 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { URL } = require("url");
+const { Pool } = require("pg");
 
 const PORT = process.env.PORT || 3000;
 const DB_PATH = path.join(__dirname, "db.json");
 const PUBLIC_DIR = path.join(__dirname, "public");
+const DATABASE_URL = process.env.DATABASE_URL || "";
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -20,6 +22,10 @@ const MIME_TYPES = {
   ".ico": "image/x-icon"
 };
 
+let pool = null;
+let stateCache = null;
+let lastPersist = Promise.resolve();
+
 function createId(prefix) {
   return `${prefix}_${crypto.randomBytes(8).toString("hex")}`;
 }
@@ -28,13 +34,7 @@ function hashPassword(password) {
   return crypto.createHash("sha256").update(password).digest("hex");
 }
 
-function readDb() {
-  if (!fs.existsSync(DB_PATH)) {
-    const seed = createSeedDb();
-    fs.writeFileSync(DB_PATH, JSON.stringify(seed, null, 2));
-    return seed;
-  }
-  const db = JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
+function normalizeDb(db) {
   let changed = false;
   if (!Array.isArray(db.users)) {
     db.users = [];
@@ -143,7 +143,7 @@ function readDb() {
     }
   }
   if (changed) {
-    writeDb(db);
+    persistState(db);
   }
   return db;
 }
@@ -211,8 +211,47 @@ function repairReplyTree(nodes) {
   return changed;
 }
 
+function persistState(db) {
+  stateCache = db;
+  if (!pool) {
+    fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
+    return;
+  }
+  lastPersist = lastPersist
+    .catch(() => {})
+    .then(() =>
+      pool.query(
+        `
+          insert into app_state (id, data, updated_at)
+          values (1, $1::jsonb, now())
+          on conflict (id)
+          do update set data = excluded.data, updated_at = now()
+        `,
+        [JSON.stringify(db)]
+      )
+    )
+    .catch(error => {
+      console.error("Failed to persist app state:", error);
+    });
+}
+
 function writeDb(db) {
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
+  persistState(db);
+}
+
+function readDb() {
+  if (stateCache) {
+    return stateCache;
+  }
+  if (!fs.existsSync(DB_PATH)) {
+    const seed = createSeedDb();
+    fs.writeFileSync(DB_PATH, JSON.stringify(seed, null, 2));
+    stateCache = normalizeDb(seed);
+    return stateCache;
+  }
+  const db = JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
+  stateCache = normalizeDb(db);
+  return stateCache;
 }
 
 function createSeedDb() {
@@ -237,6 +276,50 @@ function createSeedDb() {
   ];
 
   return { users, posts: [], sessions: [] };
+}
+
+async function ensureDatabase() {
+  if (!DATABASE_URL) {
+    stateCache = readDb();
+    return;
+  }
+
+  pool = new Pool({
+    connectionString: DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+  });
+
+  await pool.query(`
+    create table if not exists app_state (
+      id integer primary key,
+      data jsonb not null,
+      updated_at timestamptz not null default now()
+    )
+  `);
+
+  const existing = await pool.query("select data from app_state where id = 1");
+  if (existing.rows.length) {
+    stateCache = normalizeDb(existing.rows[0].data);
+    return;
+  }
+
+  let initialState;
+  if (fs.existsSync(DB_PATH)) {
+    initialState = normalizeDb(JSON.parse(fs.readFileSync(DB_PATH, "utf8")));
+  } else {
+    initialState = createSeedDb();
+  }
+
+  stateCache = initialState;
+  await pool.query(
+    `
+      insert into app_state (id, data, updated_at)
+      values (1, $1::jsonb, now())
+      on conflict (id)
+      do update set data = excluded.data, updated_at = now()
+    `,
+    [JSON.stringify(initialState)]
+  );
 }
 
 function sendJson(res, statusCode, payload) {
@@ -381,9 +464,7 @@ function sanitizeUsername(username) {
 }
 
 function formatFeed(db, user) {
-  const visibleIds = new Set([user.id, ...user.followingIds]);
   return db.posts
-    .filter(post => visibleIds.has(post.userId))
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
     .map(post => enrichPost(db, post, user.id));
 }
@@ -1210,8 +1291,21 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`ZBS server running on http://localhost:${PORT}`);
-});
+(async () => {
+  try {
+    await ensureDatabase();
+    server.listen(PORT, () => {
+      console.log(`ZBS server running on http://localhost:${PORT}`);
+      if (DATABASE_URL) {
+        console.log("Neon/Postgres storage enabled.");
+      } else {
+        console.log("Local db.json storage enabled.");
+      }
+    });
+  } catch (error) {
+    console.error("Failed to start server:", error);
+    process.exit(1);
+  }
+})();
 
 
