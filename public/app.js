@@ -553,7 +553,38 @@ async function adminClearPosts() { await api("/api/admin/clear-posts", { method:
 function openProfile(username) { state.activeView = "profile"; return loadProfile(username).then(renderActiveView); }
 function findPostAnywhere(postId) { return state.feed.find(p => p.id === postId) || state.bookmarks.find(p => p.id === postId) || state.profile?.posts.find(p => p.id === postId) || state.searchResults?.posts.find(p => p.id === postId) || state.admin?.posts.find(p => p.id === postId) || null; }
 function startEditPost(post) { state.editingPostId = post.id; composerInput.value = post.content || ""; composerCount.textContent = `${composerInput.value.length} / 280`; setComposerImage(post.imageUrl || ""); document.getElementById("publishBtn").textContent = "Сохранить"; openComposer(); }
-function readFileAsDataUrl(file, callback) { if (!file) return; if (file.size > 2000000) { alert("Файл слишком большой. До 2 МБ."); return; } const reader = new FileReader(); reader.onload = () => callback(reader.result); reader.readAsDataURL(file); }
+function readFileAsDataUrl(file, callback, options = {}) {
+  if (!file) return;
+  if (file.size > 12000000) {
+    alert("Файл слишком большой. До 12 МБ.");
+    return;
+  }
+  const {
+    maxWidth = 1600,
+    maxHeight = 1600,
+    quality = 0.82,
+    mimeType = "image/jpeg"
+  } = options;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const image = new Image();
+    image.onload = () => {
+      let { width, height } = image;
+      const ratio = Math.min(maxWidth / width, maxHeight / height, 1);
+      width = Math.max(1, Math.round(width * ratio));
+      height = Math.max(1, Math.round(height * ratio));
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d");
+      context.drawImage(image, 0, 0, width, height);
+      callback(canvas.toDataURL(mimeType, quality));
+    };
+    image.onerror = () => alert("Не удалось обработать изображение.");
+    image.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+}
 
 document.querySelectorAll("[data-auth-tab]").forEach(button => button.addEventListener("click", () => { document.querySelectorAll("[data-auth-tab]").forEach(tab => tab.classList.remove("active")); document.querySelectorAll(".auth-form").forEach(form => form.classList.remove("active")); button.classList.add("active"); document.getElementById(`${button.dataset.authTab}Form`).classList.add("active"); setStatus(""); }));
 document.getElementById("loginForm").addEventListener("submit", event => handleAuthSubmit(event, "/api/auth/login"));
@@ -568,9 +599,9 @@ document.getElementById("closeProfileBtn").addEventListener("click", closeProfil
 document.querySelector('[data-close-profile-modal="true"]').addEventListener("click", closeProfileEditor);
 document.getElementById("saveProfileBtn").addEventListener("click", async () => { try { await saveProfile(); } catch (error) { profileStatus.textContent = error.message; } });
 composerInput.addEventListener("input", () => { composerCount.textContent = `${composerInput.value.length} / 280`; });
-composerImageInput.addEventListener("change", event => readFileAsDataUrl(event.target.files[0], setComposerImage));
-profileAvatarInput.addEventListener("change", event => readFileAsDataUrl(event.target.files[0], result => setProfileImagePreview("avatar", result)));
-profileBannerInput.addEventListener("change", event => readFileAsDataUrl(event.target.files[0], result => setProfileImagePreview("banner", result)));
+composerImageInput.addEventListener("change", event => readFileAsDataUrl(event.target.files[0], setComposerImage, { maxWidth: 1600, maxHeight: 1600, quality: 0.82 }));
+profileAvatarInput.addEventListener("change", event => readFileAsDataUrl(event.target.files[0], result => setProfileImagePreview("avatar", result), { maxWidth: 700, maxHeight: 700, quality: 0.8 }));
+profileBannerInput.addEventListener("change", event => readFileAsDataUrl(event.target.files[0], result => setProfileImagePreview("banner", result), { maxWidth: 1600, maxHeight: 900, quality: 0.8 }));
 document.getElementById("publishBtn").addEventListener("click", async () => { try { await publishPost(); } catch (error) { alert(error.message); } });
 searchInput.addEventListener("input", event => runSearch(event.target.value).catch(console.error));
 document.addEventListener("keydown", event => { if (event.key === "Escape") { closeComposer(); closeProfileEditor(); } });
